@@ -11,12 +11,14 @@ from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.naive_bayes import GaussianNB
 from xgboost import XGBClassifier
-from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score, accuracy_score, roc_curve
+from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score, accuracy_score, roc_curve, auc
 import json
-# 加载数据
+from sklearn.preprocessing import label_binarize
 
-data_dir = "/mnt/hpc/home/algorithm/xiongjun/NEW-MIL-dir-backup/huiyidata/data2"
-exp_dir = "/mnt/hpc/home/algorithm/xiongjun/NEW-MIL-dir-backup/huiyidata/data2/exp"
+#输入输出路径
+data_dir = ""
+exp_dir = ""
+
 train_data = torch.load(os.path.join(data_dir, 'train_data_72.pt'))
 train_label = torch.load(os.path.join(data_dir, 'train_label_72.pt'))
 test_data = torch.load(os.path.join(data_dir, 'test_data_72.pt'))
@@ -24,8 +26,8 @@ test_label = torch.load(os.path.join(data_dir, 'test_label_72.pt'))
 
 # 数据预处理
 def preprocess_data(data):
-    part1 = data[:, :13000]
-    part2 = data[:, 100000:113000]
+    part1 = data[:, :10000]
+    part2 = data[:, 100000:110000]
     return torch.cat([part1, part2], dim=1)
 
 X_train = preprocess_data(train_data).numpy()
@@ -34,8 +36,8 @@ X_test = preprocess_data(test_data).numpy()
 y_test = np.argmax(test_label.numpy(), axis=1)
 
 # # Calculate sample size for each dataset
-# train_sample_size = len(X_train) // 10
-# test_sample_size = len(X_test) // 10
+# train_sample_size = 40
+# test_sample_size = 4
 
 # # Stratified sampling to maintain label distribution
 # _, X_train_sampled, _, y_train_sampled = train_test_split(
@@ -140,7 +142,8 @@ param_grids = {
 }
 
 best_models = {}
-
+n_classes = len(np.unique(y_test))
+y_test_bin = label_binarize(y_test, classes=range(n_classes))
 """
 GridSearchCV 会从 param_grids 中将所有可能的参数组合逐一与模型搭配，采用交叉验证（cv=3）在训练集上进行多次训练与评估。
 搜索过程中会比较每种参数组合下模型的评估得分（accuracy），选出得分最高的参数配置作为最佳参数。
@@ -151,15 +154,13 @@ for name, model in models.items():
     gs = GridSearchCV(model, param_grids[name], cv=4, scoring='accuracy', n_jobs=-1)
     gs.fit(X_train, y_train)
     best_models[name] = gs.best_estimator_
+    
     print(f"=== {name} ===")
     print("Best Params:", gs.best_params_)
     
     test_preds = gs.predict(X_test)
-    probs = gs.predict_proba(X_test)[:, 1] if hasattr(gs, 'predict_proba') else None
-    
-    acc = accuracy_score(y_test, test_preds)
-    auc_val = roc_auc_score(y_test, probs) if probs is not None else 0
-    folder_name = f"{name}_acc_{acc:.4f}_auc_{auc_val:.4f}"
+    acc = accuracy_score(y_test, test_preds) 
+    folder_name = f"{name}_acc_{acc:.4f}"
     folder_name = os.path.join(exp_dir, folder_name)
     os.makedirs(folder_name, exist_ok=True)
     
@@ -168,17 +169,36 @@ for name, model in models.items():
     # 保存超参
     with open(f"{folder_name}/{name}_hyperparameters.json", 'w') as f:
         json.dump(gs.best_params_, f, indent=4)
+    
     print(classification_report(y_test, test_preds))
     print("Confusion Matrix:\n", confusion_matrix(y_test, test_preds))
-    if probs is not None:
-        print("ROC AUC:", auc_val)
-        fpr, tpr, _ = roc_curve(y_test, probs)
-        plt.figure()
-        plt.plot(fpr, tpr, label=f'{name} (AUC={auc_val:.2f})')
+    
+    if hasattr(gs, 'predict_proba'):
+        probs = gs.predict_proba(X_test)
+        
+        # 对每个类别分别计算fpr、tpr
+        fpr, tpr, roc_auc = {}, {}, {}
+        for i in range(n_classes):
+            fpr[i], tpr[i], _ = roc_curve(y_test_bin[:, i], probs[:, i])
+            roc_auc[i] = auc(fpr[i], tpr[i])
+        
+        # micro-average
+        fpr["micro"], tpr["micro"], _ = roc_curve(y_test_bin.ravel(), probs.ravel())
+        roc_auc["micro"] = auc(fpr["micro"], tpr["micro"])
+        
+        # 绘制多条ROC曲线
+        plt.figure(figsize=(6, 6))
+        colors = plt.cm.tab10(np.linspace(0, 1, n_classes))
+        for i, color in zip(range(n_classes), colors):
+            plt.plot(fpr[i], tpr[i], color=color, 
+                     label=f'Class {i} (AUC={roc_auc[i]:.2f})')
+        
+        plt.plot([0, 1], [0, 1], '--', color='red', label='_nolegend_')
+        
         plt.xlabel('False Positive Rate')
         plt.ylabel('True Positive Rate')
-        plt.title(f'{name} ROC Curve')
+        plt.title(f'{name} ROC (One-vs-Rest)')
         plt.legend()
-        plt.savefig(f"{folder_name}/{name}_ROC.png")
+        plt.savefig(f"{folder_name}/{name}_ROC_OVR.png")
         plt.close()
     print()
