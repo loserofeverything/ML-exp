@@ -1,6 +1,0 @@
-{
-    "C": 100,
-    "l1_ratio": 0.5,
-    "penalty": "elasticnet",
-    "solver": "saga"
-}
